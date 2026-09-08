@@ -5,3 +5,5 @@ silero-vad>=6.0.0
 torch>=2.0.0
 openwakeword>=0.6.0
 onnxruntime>=1.10.0
+faster-whisper>=1.0.0
+
