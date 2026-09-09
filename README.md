@@ -1,152 +1,106 @@
 # Vocalis — Low-Latency Local Voice Assistant
 
-**Vocalis V4** is a software-only, offline voice assistant that listens for a wake word, converts speech to text, understands predefined commands, and safely executes whitelisted actions on the local system.
+Vocalis V4 is a **software-only, offline voice assistant** that detects a wake word, converts speech to text, understands predefined commands, and safely executes whitelisted actions on the local system.
 
-No cloud APIs. No LLM required.
+**Python · Silero VAD · OpenWakeWord · faster-whisper · Offline**
 
 ---
 
-## How It Works
+## Overview
+
+Vocalis processes voice through a lightweight cascade instead of running speech recognition continuously.
 
 ```mermaid
 flowchart LR
-    A[🎙️ Microphone<br/>16 kHz Mono] --> B[Audio Chunks<br/>512 samples / ~32 ms]
-
-    B --> C[Silero VAD<br/>Speech Detection]
-
-    C -->|Speech| D[OpenWakeWord<br/>"Hey Jarvis"]
-
+    A[Microphone<br/>16 kHz Mono] --> B[Audio Chunks<br/>512 samples]
+    B --> C[Silero VAD]
+    C -->|Speech| D[OpenWakeWord]
     C -->|Silence| B
-
-    D -->|Detected| E[Active Listening]
-
+    D -->|"Hey Jarvis"| E[Active Listening]
     E --> F[Record Command]
-
-    F -->|Silence > 1s| G[faster-whisper<br/>Local STT]
-
+    F --> G[faster-whisper]
     G --> H[Command Parser]
-
-    H --> I{Whitelist<br/>Check}
-
+    H --> I{Whitelist}
     I -->|Allowed| J[Command Executor]
-
-    I -->|Blocked| K[Reject Command]
-
+    I -->|Blocked| K[Reject]
     J --> L[System Action]
-    K --> M[Display Result]
-    L --> M
 ```
 
-The pipeline is intentionally **cascaded**:
+### Pipeline
 
-**VAD → Wake Word → STT → Command Parsing → Safe Execution**
+**Microphone → VAD → Wake Word → Recording → STT → Command Parsing → Safe Execution**
 
-This avoids running expensive speech recognition continuously when nobody is speaking.
+The cascade reduces unnecessary processing by filtering silence before running the more expensive stages.
 
 ---
 
-## Signal Chain
+## What Vocalis Does
 
-```mermaid
-flowchart LR
-    A[Microphone] --> B[Capture<br/>16 kHz]
-    B --> C[512 Samples<br/>32 ms]
-    C --> D[Thread-Safe<br/>Queue]
-    D --> E[Silero VAD]
-
-    E -->|Speech| F[OpenWakeWord]
-    F -->|"Hey Jarvis"| G[Listening Mode]
-
-    G --> H[Audio Buffer]
-    H --> I[Silence Detection]
-    I --> J[faster-whisper]
-
-    J --> K["Text<br/>Open Notepad"]
-    K --> L[Command Parser]
-    L --> M["Intent<br/>OPEN_APPLICATION"]
-    M --> N["Target<br/>NOTEPAD"]
-    N --> O[Whitelist]
-    O --> P[Executor]
-    P --> Q[Notepad Opens]
-```
-
----
-
-## State Machine
-
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-
-    IDLE --> WAKE_WORD_DETECTED: Hey Jarvis detected
-    WAKE_WORD_DETECTED --> LISTENING
-
-    LISTENING --> RECORDING: Speech starts
-    RECORDING --> TRANSCRIBING: Silence detected
-
-    TRANSCRIBING --> UNDERSTANDING: Text received
-    UNDERSTANDING --> EXECUTING: Command allowed
-    UNDERSTANDING --> RESULT: Command rejected
-
-    EXECUTING --> RESULT
-    RESULT --> IDLE
-```
-
----
-
-## Example
-
-**User says:**
-
-> Hey Jarvis
-
-Vocalis detects the wake word and starts listening.
-
-**User says:**
-
-> Open Notepad
-
-The system processes it as:
+Example:
 
 ```text
-Speech
-   ↓
-"Open Notepad"
-   ↓
+User:
+    "Hey Jarvis"
+
+Vocalis:
+    Wake word detected
+
+User:
+    "Open Notepad"
+
+Vocalis:
+    Speech → Text
+          → Intent
+          → Target
+          → Whitelist check
+          → Execute
+```
+
+Result:
+
+```text
 OPEN_APPLICATION
-   ↓
-NOTEPAD
-   ↓
-Whitelist Check
-   ↓
-notepad.exe
-   ↓
-Notepad Opens
+        ↓
+     NOTEPAD
+        ↓
+   notepad.exe
+        ↓
+   Notepad Opens
 ```
 
 ---
 
-## Command Understanding
+## Command Processing & Security
 
-Vocalis does not send raw speech directly to the operating system.
-
-Instead, the command passes through a structured representation:
+Vocalis does **not** execute the raw text produced by STT.
 
 ```mermaid
 flowchart TD
     A["Open Notepad"] --> B[Normalize Text]
-    B --> C[Match Command Pattern]
-    C --> D["Intent: OPEN_APPLICATION"]
-    D --> E["Target: NOTEPAD"]
+    B --> C[Match Command]
+    C --> D["OPEN_APPLICATION"]
+    D --> E["NOTEPAD"]
     E --> F{Whitelisted?}
-
-    F -->|Yes| G[Execute Registered Action]
-    F -->|No| H[Reject]
+    F -->|Yes| G[Registered Action]
+    F -->|No| H[Reject Command]
+    G --> I[Safe Executor]
+    I --> J[Local System Action]
 ```
 
-### Supported Actions
+### Security Design
 
-| Voice Command      | Intent             | Target        |
+* Only registered commands can be executed.
+* Raw shell commands are never accepted.
+* No arbitrary command execution.
+* Dangerous inputs are rejected.
+* Missing applications are handled gracefully.
+* Command parsing and command execution are separate modules.
+
+---
+
+## Supported Commands
+
+| Command            | Intent             | Target        |
 | ------------------ | ------------------ | ------------- |
 | Open Notepad       | `OPEN_APPLICATION` | `NOTEPAD`     |
 | Open Calculator    | `OPEN_APPLICATION` | `CALCULATOR`  |
@@ -160,108 +114,72 @@ flowchart TD
 | What date is it    | `GET_DATE`         | `SYSTEM_DATE` |
 | Exit Vocalis       | `EXIT_APPLICATION` | `VOCALIS`     |
 
----
-
-## Security
-
-The executor never accepts arbitrary shell commands.
-
-```mermaid
-flowchart LR
-    A[Voice Input] --> B[STT Text]
-    B --> C[Command Parser]
-    C --> D{Registered<br/>Command?}
-
-    D -->|No| E[Reject]
-    D -->|Yes| F[Whitelist Action]
-
-    F --> G[Safe Executor]
-    G --> H[Local System Action]
-```
-
-### Design
-
-* Commands are mapped to predefined actions.
-* Arbitrary shell strings are not executed.
-* `shell=True` is avoided.
-* Suspicious commands are rejected.
-* Missing applications are handled without crashing.
-* Only registered actions can reach the executor.
+The command layer is **rule-based** rather than LLM-based, making the supported actions predictable and controlled.
 
 ---
 
-## Models
+## Models & Technologies
 
-| Component             | Model / Technology    | Purpose                |
-| --------------------- | --------------------- | ---------------------- |
-| VAD                   | **Silero VAD**        | Detect speech          |
-| Wake Word             | **OpenWakeWord**      | Detect `"Hey Jarvis"`  |
-| STT                   | **faster-whisper**    | Convert speech → text  |
-| Command Understanding | **Rule-based parser** | Text → intent + target |
+| Component                | Technology                        | Purpose                    |
+| ------------------------ | --------------------------------- | -------------------------- |
+| Voice Activity Detection | **Silero VAD**                    | Detect speech              |
+| Wake Word                | **OpenWakeWord**                  | Detect `"Hey Jarvis"`      |
+| Speech-to-Text           | **faster-whisper**                | Speech → text              |
+| Command Understanding    | **Rule-based parser**             | Text → intent + target     |
+| System Execution         | **Python subprocess/system APIs** | Execute registered actions |
 
-The command layer is intentionally rule-based. It keeps the system predictable and avoids adding an LLM where one is not necessary.
+Everything runs locally without cloud APIs.
 
 ---
 
 ## Audio Processing
 
-Vocalis processes audio continuously in small chunks:
+Vocalis captures microphone audio at:
 
 ```text
-Microphone
-    │
-    ▼
-16,000 samples / second
-    │
-    ▼
-512 samples
-    │
-    ▼
-~32 ms audio chunk
-    │
-    ▼
-VAD → Wake Word → Recording
+Sample Rate : 16,000 Hz
+Channels    : Mono
+Data Type   : Float32
+Chunk Size  : 512 samples
+Chunk Time  : ~32 ms
 ```
 
-A thread-safe queue separates microphone capture from processing so the audio callback does not perform heavy inference work.
+The microphone callback places audio into a **thread-safe queue**. Processing happens separately so model inference does not block microphone capture.
 
 ---
 
-## What I Learned
+## State Flow
 
-### Audio & Speech
-
-* Digital audio and sampling
-* Audio chunks and buffering
-* Voice Activity Detection
-* Wake-word detection
-* Speech-to-Text
-* Silence-based speech segmentation
-
-### Machine Learning
-
-* Using pretrained models
-* Model inference pipelines
-* Confidence thresholds
-* CPU inference
-* Quantized inference with `int8`
-
-### Software Engineering
-
-* Modular Python architecture
-* State machines
-* Thread-safe queues
-* Error handling
-* Unit testing
-* Separation of parsing and execution
-
-### System Engineering
-
-* Local/offline processing
-* Latency measurement
-* CPU and RAM monitoring
-* Safe subprocess execution
-* Whitelist-based command execution
+```text
+IDLE
+  │
+  │ Wake word
+  ▼
+WAKE_WORD_DETECTED
+  │
+  ▼
+LISTENING
+  │
+  │ Speech
+  ▼
+RECORDING
+  │
+  │ Silence
+  ▼
+TRANSCRIBING
+  │
+  ▼
+UNDERSTANDING
+  │
+  ▼
+EXECUTING
+  │
+  ▼
+RESULT
+  │
+  ▼
+IDLE
+```
 
 ---
 
@@ -273,13 +191,10 @@ Vocalis/
 ├── app.py
 ├── requirements.txt
 ├── README.md
-│
 ├── tests/
-│   ├── __init__.py
 │   └── test_commands.py
 │
 └── vocalis/
-    │
     ├── app.py
     │
     ├── audio/
@@ -303,53 +218,38 @@ Vocalis/
         └── metrics.py
 ```
 
----
+### Module Responsibilities
 
-## Key Libraries
-
-```text
-sounddevice
-    └── Microphone audio capture
-
-NumPy
-    └── Audio array processing
-
-PyTorch
-    └── Model inference
-
-Silero VAD
-    └── Speech detection
-
-OpenWakeWord
-    └── Wake-word detection
-
-faster-whisper
-    └── Local speech-to-text
-
-psutil
-    └── CPU / RAM monitoring
-```
+* `microphone.py` — captures microphone audio
+* `vad/detector.py` — speech detection
+* `wakeword/detector.py` — wake-word detection
+* `stt/detector.py` — local speech-to-text
+* `commands/registry.py` — registered commands and aliases
+* `commands/parser.py` — text normalization and intent matching
+* `commands/executor.py` — safe action execution
+* `monitoring/metrics.py` — latency, CPU and RAM metrics
+* `app.py` — application flow and state management
 
 ---
 
 ## Performance
 
-Runtime metrics are measured by Vocalis itself.
+Measured runtime values from the current implementation:
 
-| Component                 | Typical Measurement |
-| ------------------------- | ------------------: |
-| VAD                       |         ~0.5–1.5 ms |
-| Wake Word                 |           ~2–4.5 ms |
-| STT                       |         ~200–420 ms |
-| Command Parser            |             ~1–3 ms |
-| Execution                 |           ~10–45 ms |
-| Total Activation → Action |         ~500–700 ms |
+| Stage               | Typical Latency |
+| ------------------- | --------------: |
+| VAD                 |     ~0.5–1.5 ms |
+| Wake Word           |       ~2–4.5 ms |
+| STT                 |     ~200–420 ms |
+| Command Parsing     |         ~1–3 ms |
+| Execution           |       ~10–45 ms |
+| Activation → Action |     ~500–700 ms |
 
-Performance depends on the CPU, microphone, model configuration, and command length.
+Actual performance depends on hardware, model configuration, and command length.
 
 ---
 
-## Running
+## Run
 
 ```bash
 python app.py
@@ -363,26 +263,41 @@ python -m unittest discover tests
 
 ---
 
-## Core Idea
+## What I Learned
 
-```text
-LISTEN
-  ↓
-DETECT
-  ↓
-UNDERSTAND
-  ↓
-VALIDATE
-  ↓
-EXECUTE
-```
+**Audio**
 
-**Vocalis is built around one simple principle:**
+* Sampling and digital audio
+* Audio chunking and buffering
+* Voice Activity Detection
+* Wake-word detection
+* Speech segmentation
 
-> Process only what is necessary, keep it local, and never execute what has not been explicitly allowed.
+**ML / AI**
+
+* Pretrained model inference
+* Confidence thresholds
+* Local speech recognition
+* Quantized CPU inference
+
+**Engineering**
+
+* Thread-safe processing
+* State machines
+* Modular architecture
+* Command parsing
+* Secure subprocess execution
+* Unit testing
+* Latency and resource monitoring
+
+---
+
+## Core Principle
+
+> **Listen only when necessary, understand locally, and execute only what has been explicitly allowed.**
 
 ---
 
 ## License
 
-MIT License
+MIT
