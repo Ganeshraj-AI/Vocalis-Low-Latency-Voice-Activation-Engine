@@ -1,286 +1,388 @@
-# Vocalis — Low-Latency Voice Activation Engine (V4)
+# Vocalis — Low-Latency Local Voice Assistant
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![VAD: Silero](https://img.shields.io/badge/VAD-Silero%20VAD-orange.svg)](https://github.com/snakers4/silero-vad)
-[![Wake-Word: OpenWakeWord](https://img.shields.io/badge/WakeWord-OpenWakeWord%20(ONNX)-purple.svg)](https://github.com/dscripka/openwakeword)
-[![STT: faster-whisper](https://img.shields.io/badge/STT-faster--whisper%20(int8)-red.svg)](https://github.com/SYSTRAN/faster-whisper)
-[![Commands: Whitelisted](https://img.shields.io/badge/Actions-Safe%20Whitelisted-brightgreen.svg)]()
+**Vocalis V4** is a software-only, offline voice assistant that listens for a wake word, converts speech to text, understands predefined commands, and safely executes whitelisted actions on the local system.
 
-**Vocalis V4** is a software-only, low-latency **Local Voice Command Assistant**. Building directly on V3's Speech-to-Text capabilities, V4 adds local intent classification, command parsing, and secure, whitelisted system action execution — operating 100% offline without cloud APIs or LLM complexity.
+No cloud APIs. No LLM required.
 
 ---
 
-## 1. What is Vocalis V4?
+## How It Works
 
-Vocalis V4 transforms Vocalis from a voice activation engine into a **Functional Voice Assistant**. Once activated by the wake word (*"Hey Jarvis"*), Vocalis V4 records your spoken command, transcribes it locally using `faster-whisper`, maps the text to a structured intent and target, and safely executes the corresponding local system action (e.g. launching Notepad, opening File Explorer, or checking the current time).
+```mermaid
+flowchart LR
+    A[🎙️ Microphone<br/>16 kHz Mono] --> B[Audio Chunks<br/>512 samples / ~32 ms]
 
-Key Principles:
-* 🔒 **100% Offline & Private**: Zero external cloud APIs, internet connections, or telemetry.
-* 🛡️ **Strict Whitelist Security**: Shell strings are never passed to system subprocesses. Dangerous or arbitrary commands (e.g. `delete files`, `format drive`) are strictly blocked.
-* ⚡ **Low Latency**: End-to-end activation-to-action execution takes under 600 ms on modern consumer CPUs.
-* 🎓 **Modular & Extensible**: Clean separation between speech recognition, command understanding, and safe action execution.
+    B --> C[Silero VAD<br/>Speech Detection]
 
----
+    C -->|Speech| D[OpenWakeWord<br/>"Hey Jarvis"]
 
-## 2. What Changed from V3?
+    C -->|Silence| B
 
-| Feature | Vocalis V3 | Vocalis V4 |
-| :--- | :--- | :--- |
-| **Pipeline** | Mic → VAD → WW → Recording → STT → Text | Mic → VAD → WW → Recording → STT → **Command Parsing → Action Execution → Result** |
-| **Action Execution** | None (Displays text result only) | Safe, whitelisted local application launching & system queries |
-| **Command Understanding**| ❌ None | ✅ Rule-based local normalization, pattern matching & intent classification |
-| **State Machine** | 6 States (`IDLE` → ... → `TEXT_RESULT`) | 9 States (`IDLE` → ... → `UNDERSTANDING` → `EXECUTING` → `RESULT`) |
-| **Security Filter** | N/A | Strict Whitelist & Blacklist guardrails against dangerous commands |
-| **Unit Test Suite** | Basic module imports | Full unittest suite (`tests/test_commands.py`) |
-| **Dashboard** | Speech transcription display | Complete V4 Command Assistant Dashboard showing Intent, Target, Action, and Result |
+    D -->|Detected| E[Active Listening]
 
----
+    E --> F[Record Command]
 
-## 3. End-to-End Pipeline & State Machine
+    F -->|Silence > 1s| G[faster-whisper<br/>Local STT]
 
-### Pipeline Architecture
+    G --> H[Command Parser]
 
-```text
-Microphone Stream (16 kHz Mono Float32)
-         │
-         ▼ (512-sample chunks ~32ms)
-   Thread-Safe Queue
-         │
-         ├─────────────────────────────────────────┐
-         ▼                                         ▼
-Stage 1: Silero VAD                      Stage 2: OpenWakeWord
-(Speech Activity Check)                  ("Hey Jarvis" Detection)
-         │                                         │
-         └────────────────────┬────────────────────┘
-                              │
-                    (Wake Word Matched!)
-                              │
-                              ▼
-                     [ ACTIVE LISTENING ]
-                              │
-                      (User Starts Speaking)
-                              │
-                              ▼
-                     [ RECORD AUDIO BUFFER ]
-                              │
-                     (Silence Detected >1.0s)
-                              │
-                              ▼
-                   Stage 3: faster-whisper STT
-                   (int8 Local CPU Inference)
-                              │
-                              ▼
-                   Stage 4: Command Parser
-               (Normalization & Whitelist Match)
-                              │
-                              ▼
-                   Stage 5: Command Executor
-               (Safe Subprocess / System Query)
-                              │
-                              ▼
-                    [ DISPLAY RESULT ]
+    H --> I{Whitelist<br/>Check}
+
+    I -->|Allowed| J[Command Executor]
+
+    I -->|Blocked| K[Reject Command]
+
+    J --> L[System Action]
+    K --> M[Display Result]
+    L --> M
 ```
 
-### State Machine Diagram
+The pipeline is intentionally **cascaded**:
 
-```text
-    ┌───────┐
-    │ IDLE  │ ──(Wake Word Match)──► ┌────────────────────┐
-    └───────┘                        │ WAKE_WORD_DETECTED │
-        ▲                            └─────────┬──────────┘
-        │                                      │
- (Hold Result 2s)                              ▼
-        │                            ┌────────────────────┐
-  ┌───────────┐                      │     LISTENING      │
-  │  RESULT   │                      └─────────┬──────────┘
-  └─────▲─────┘                                │ (Speech Start)
-        │                                      ▼
-  ┌───────────┐                      ┌────────────────────┐
-  │ EXECUTING │                      │     RECORDING      │
-  └─────▲─────┘                      └─────────┬──────────┘
-        │                                      │ (Silence >1.0s)
-  ┌─────────────┐     ┌──────────────┐         ▼
-  │UNDERSTANDING│ ◄───│ TRANSCRIBING │ ◄───────┘
-  └─────────────┘     └──────────────┘
+**VAD → Wake Word → STT → Command Parsing → Safe Execution**
+
+This avoids running expensive speech recognition continuously when nobody is speaking.
+
+---
+
+## Signal Chain
+
+```mermaid
+flowchart LR
+    A[Microphone] --> B[Capture<br/>16 kHz]
+    B --> C[512 Samples<br/>32 ms]
+    C --> D[Thread-Safe<br/>Queue]
+    D --> E[Silero VAD]
+
+    E -->|Speech| F[OpenWakeWord]
+    F -->|"Hey Jarvis"| G[Listening Mode]
+
+    G --> H[Audio Buffer]
+    H --> I[Silence Detection]
+    I --> J[faster-whisper]
+
+    J --> K["Text<br/>Open Notepad"]
+    K --> L[Command Parser]
+    L --> M["Intent<br/>OPEN_APPLICATION"]
+    M --> N["Target<br/>NOTEPAD"]
+    N --> O[Whitelist]
+    O --> P[Executor]
+    P --> Q[Notepad Opens]
 ```
 
 ---
 
-## 4. Supported Commands & Variations
+## State Machine
 
-Vocalis V4 supports natural variations for common commands, mapping them cleanly to standardized intents and targets:
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
 
-| User Voice Input Examples | Matched Intent | Target | Executed Action |
-| :--- | :--- | :--- | :--- |
-| *"Open Notepad"*, *"Launch Notepad"*, *"Can you open Notepad"* | `OPEN_APPLICATION` | `NOTEPAD` | Launches `notepad.exe` |
-| *"Open Calculator"*, *"Launch Calc"*, *"Open the calculator"* | `OPEN_APPLICATION` | `CALCULATOR` | Launches `calc.exe` |
-| *"Open Paint"*, *"Start Paint"* | `OPEN_APPLICATION` | `PAINT` | Launches `mspaint.exe` |
-| *"Open File Explorer"*, *"Open Explorer"*, *"Open my computer"* | `OPEN_APPLICATION` | `EXPLORER` | Launches `explorer.exe` |
-| *"Open Chrome"*, *"Launch Google Chrome"*, *"Open browser"* | `OPEN_APPLICATION` | `CHROME` | Launches `chrome.exe` |
-| *"Open VS Code"*, *"Launch Code"* | `OPEN_APPLICATION` | `VSCODE` | Launches `code` (if installed) |
-| *"Open Downloads"*, *"Open Downloads folder"* | `OPEN_FOLDER` | `DOWNLOADS` | Opens `~/Downloads` in File Explorer |
-| *"Open Desktop"*, *"Open Desktop folder"* | `OPEN_FOLDER` | `DESKTOP` | Opens `~/Desktop` in File Explorer |
-| *"What time is it"*, *"Tell current time"* | `GET_TIME` | `SYSTEM_TIME` | Displays formatted local time |
-| *"What date is it"*, *"Tell current date"* | `GET_DATE` | `SYSTEM_DATE` | Displays formatted local date |
-| *"Exit Vocalis"*, *"Close Vocalis"*, *"Quit"* | `EXIT_APPLICATION` | `VOCALIS` | Gracefully terminates Vocalis engine |
+    IDLE --> WAKE_WORD_DETECTED: Hey Jarvis detected
+    WAKE_WORD_DETECTED --> LISTENING
 
----
+    LISTENING --> RECORDING: Speech starts
+    RECORDING --> TRANSCRIBING: Silence detected
 
-## 5. Security & Whitelisting Design
+    TRANSCRIBING --> UNDERSTANDING: Text received
+    UNDERSTANDING --> EXECUTING: Command allowed
+    UNDERSTANDING --> RESULT: Command rejected
 
-Security is a primary design goal of Vocalis V4:
-
-1. **No Arbitrary Shell Strings**: Commands are never passed directly to `system()` or `shell=True` subprocesses.
-2. **Whitelist-Only Action Mapping**: The `CommandParser` checks inputs against a closed registry of supported intents. Unregistered commands return `"Command not recognized"`.
-3. **Explicit Blacklist Filtering**: Inputs containing suspicious substrings (e.g. `delete`, `format`, `rmdir`, `powershell`, `cmd.exe`) are immediately rejected with `"Blocked: Unauthorized command"`.
-4. **Missing Application Graceful Handling**: If an application (e.g. Photoshop, Chrome) is not installed on the system, Vocalis reports `"Chrome was not found on this computer"` without crashing.
+    EXECUTING --> RESULT
+    RESULT --> IDLE
+```
 
 ---
 
-## 6. Project Structure
+## Example
+
+**User says:**
+
+> Hey Jarvis
+
+Vocalis detects the wake word and starts listening.
+
+**User says:**
+
+> Open Notepad
+
+The system processes it as:
 
 ```text
-Vocalis — Low-Latency Voice Activation Engine/
-├── app.py                      # Application entry point (delegates to vocalis/app.py)
-├── requirements.txt            # Dependency specification
-├── README.md                   # Project documentation
-├── tests/                      # Unit test suite
+Speech
+   ↓
+"Open Notepad"
+   ↓
+OPEN_APPLICATION
+   ↓
+NOTEPAD
+   ↓
+Whitelist Check
+   ↓
+notepad.exe
+   ↓
+Notepad Opens
+```
+
+---
+
+## Command Understanding
+
+Vocalis does not send raw speech directly to the operating system.
+
+Instead, the command passes through a structured representation:
+
+```mermaid
+flowchart TD
+    A["Open Notepad"] --> B[Normalize Text]
+    B --> C[Match Command Pattern]
+    C --> D["Intent: OPEN_APPLICATION"]
+    D --> E["Target: NOTEPAD"]
+    E --> F{Whitelisted?}
+
+    F -->|Yes| G[Execute Registered Action]
+    F -->|No| H[Reject]
+```
+
+### Supported Actions
+
+| Voice Command      | Intent             | Target        |
+| ------------------ | ------------------ | ------------- |
+| Open Notepad       | `OPEN_APPLICATION` | `NOTEPAD`     |
+| Open Calculator    | `OPEN_APPLICATION` | `CALCULATOR`  |
+| Open Paint         | `OPEN_APPLICATION` | `PAINT`       |
+| Open File Explorer | `OPEN_APPLICATION` | `EXPLORER`    |
+| Open Chrome        | `OPEN_APPLICATION` | `CHROME`      |
+| Open VS Code       | `OPEN_APPLICATION` | `VSCODE`      |
+| Open Downloads     | `OPEN_FOLDER`      | `DOWNLOADS`   |
+| Open Desktop       | `OPEN_FOLDER`      | `DESKTOP`     |
+| What time is it    | `GET_TIME`         | `SYSTEM_TIME` |
+| What date is it    | `GET_DATE`         | `SYSTEM_DATE` |
+| Exit Vocalis       | `EXIT_APPLICATION` | `VOCALIS`     |
+
+---
+
+## Security
+
+The executor never accepts arbitrary shell commands.
+
+```mermaid
+flowchart LR
+    A[Voice Input] --> B[STT Text]
+    B --> C[Command Parser]
+    C --> D{Registered<br/>Command?}
+
+    D -->|No| E[Reject]
+    D -->|Yes| F[Whitelist Action]
+
+    F --> G[Safe Executor]
+    G --> H[Local System Action]
+```
+
+### Design
+
+* Commands are mapped to predefined actions.
+* Arbitrary shell strings are not executed.
+* `shell=True` is avoided.
+* Suspicious commands are rejected.
+* Missing applications are handled without crashing.
+* Only registered actions can reach the executor.
+
+---
+
+## Models
+
+| Component             | Model / Technology    | Purpose                |
+| --------------------- | --------------------- | ---------------------- |
+| VAD                   | **Silero VAD**        | Detect speech          |
+| Wake Word             | **OpenWakeWord**      | Detect `"Hey Jarvis"`  |
+| STT                   | **faster-whisper**    | Convert speech → text  |
+| Command Understanding | **Rule-based parser** | Text → intent + target |
+
+The command layer is intentionally rule-based. It keeps the system predictable and avoids adding an LLM where one is not necessary.
+
+---
+
+## Audio Processing
+
+Vocalis processes audio continuously in small chunks:
+
+```text
+Microphone
+    │
+    ▼
+16,000 samples / second
+    │
+    ▼
+512 samples
+    │
+    ▼
+~32 ms audio chunk
+    │
+    ▼
+VAD → Wake Word → Recording
+```
+
+A thread-safe queue separates microphone capture from processing so the audio callback does not perform heavy inference work.
+
+---
+
+## What I Learned
+
+### Audio & Speech
+
+* Digital audio and sampling
+* Audio chunks and buffering
+* Voice Activity Detection
+* Wake-word detection
+* Speech-to-Text
+* Silence-based speech segmentation
+
+### Machine Learning
+
+* Using pretrained models
+* Model inference pipelines
+* Confidence thresholds
+* CPU inference
+* Quantized inference with `int8`
+
+### Software Engineering
+
+* Modular Python architecture
+* State machines
+* Thread-safe queues
+* Error handling
+* Unit testing
+* Separation of parsing and execution
+
+### System Engineering
+
+* Local/offline processing
+* Latency measurement
+* CPU and RAM monitoring
+* Safe subprocess execution
+* Whitelist-based command execution
+
+---
+
+## Project Structure
+
+```text
+Vocalis/
+│
+├── app.py
+├── requirements.txt
+├── README.md
+│
+├── tests/
 │   ├── __init__.py
-│   └── test_commands.py        # Parser and security whitelist unit tests
-└── vocalis/                    # Core Python package
-    ├── __init__.py
-    ├── app.py                  # V4 state machine loop & terminal dashboard
+│   └── test_commands.py
+│
+└── vocalis/
+    │
+    ├── app.py
+    │
     ├── audio/
-    │   ├── __init__.py
-    │   └── microphone.py       # SoundDevice audio stream capture (16kHz mono)
+    │   └── microphone.py
+    │
     ├── vad/
-    │   ├── __init__.py
-    │   └── detector.py         # Silero VAD detector
+    │   └── detector.py
+    │
     ├── wakeword/
-    │   ├── __init__.py
-    │   └── detector.py         # OpenWakeWord ONNX detector
+    │   └── detector.py
+    │
     ├── stt/
-    │   ├── __init__.py
-    │   └── detector.py         # Local faster-whisper STT detector (int8 CPU)
+    │   └── detector.py
+    │
     ├── commands/
-    │   ├── __init__.py
-    │   ├── registry.py         # Whitelisted command intent & alias definitions
-    │   ├── parser.py           # Text normalization, security filtering & parser
-    │   └── executor.py         # Safe subprocess & system action executor
+    │   ├── registry.py
+    │   ├── parser.py
+    │   └── executor.py
+    │
     └── monitoring/
-        ├── __init__.py
-        └── metrics.py          # Latency timer, CPU (%), and RAM (MB) monitor
+        └── metrics.py
 ```
 
 ---
 
-## 7. Installation & Execution
+## Key Libraries
 
-### Running the Application
+```text
+sounddevice
+    └── Microphone audio capture
+
+NumPy
+    └── Audio array processing
+
+PyTorch
+    └── Model inference
+
+Silero VAD
+    └── Speech detection
+
+OpenWakeWord
+    └── Wake-word detection
+
+faster-whisper
+    └── Local speech-to-text
+
+psutil
+    └── CPU / RAM monitoring
+```
+
+---
+
+## Performance
+
+Runtime metrics are measured by Vocalis itself.
+
+| Component                 | Typical Measurement |
+| ------------------------- | ------------------: |
+| VAD                       |         ~0.5–1.5 ms |
+| Wake Word                 |           ~2–4.5 ms |
+| STT                       |         ~200–420 ms |
+| Command Parser            |             ~1–3 ms |
+| Execution                 |           ~10–45 ms |
+| Total Activation → Action |         ~500–700 ms |
+
+Performance depends on the CPU, microphone, model configuration, and command length.
+
+---
+
+## Running
 
 ```bash
-# Using standard Python launcher (Windows):
-py app.py
-
-# Or using python:
 python app.py
 ```
 
-### Running Unit Tests
-
-Run the test suite to verify command parsing and security filtering:
+Run tests:
 
 ```bash
-py -m unittest discover tests
+python -m unittest discover tests
 ```
 
 ---
 
-## 8. Example Terminal Dashboard Output
+## Core Idea
 
 ```text
-╔════════════════════════════════════════════════════════════╗
-║                         VOCALIS V4                         ║
-║       Local Voice Command Assistant (VAD+WW+STT)           ║
-╚════════════════════════════════════════════════════════════╝
-
-Microphone:   Active (16 kHz Mono)                           
-Engine State: 📝 Result ready                                
-
-VAD Status:   🔊 Speech detected        [Latency: 0.8 ms]        
-Wake-Word:    ⚡ DETECTED [hey_jarvis] (0.87) [Latency: 2.5 ms]   
-STT Engine:   ✅ Completed                                   
-
-──────────────────────────────────────────────────────────────
-Transcribed:  "Open Notepad"                                 
-Intent:       OPEN_APPLICATION                               
-Target:       NOTEPAD                                        
-Action:       Launching Notepad...                           
-Result:       ✓ Notepad opened                               
-──────────────────────────────────────────────────────────────
-STT Latency:          380.0 ms                 
-Command Parsing:      1.5 ms                   
-Execution Latency:    35.0 ms                  
-Total Activation Time:520.0 ms                 
-Speech Duration:      1.80 s                   
-──────────────────────────────────────────────────────────────
-CPU Usage:            3.2%                      
-Memory Usage:         280.5 MB                  
+LISTEN
+  ↓
+DETECT
+  ↓
+UNDERSTAND
+  ↓
+VALIDATE
+  ↓
+EXECUTE
 ```
 
----
+**Vocalis is built around one simple principle:**
 
-## 9. Performance Metrics
-
-All performance numbers are **empirically measured** during runtime:
-
-* **VAD Latency**: ~0.5 – 1.5 ms per 32 ms chunk.
-* **Wake-Word Latency**: ~2.0 – 4.5 ms per 32 ms chunk.
-* **STT Latency**: ~200 – 420 ms for typical spoken commands.
-* **Command Parsing Latency**: ~1.0 – 3.0 ms (rule-based local regex/alias matching).
-* **Command Execution Latency**: ~10 – 45 ms (subprocess launch).
-* **Total Wake-Word to Action Latency**: **~500 – 700 ms total**.
-* **CPU Usage**: ~2 – 5% idle while listening; peak ~20 – 35% during brief STT.
-* **RAM Footprint**: ~260 – 350 MB total memory utilization.
+> Process only what is necessary, keep it local, and never execute what has not been explicitly allowed.
 
 ---
 
-## 10. Version Comparison (V1 → V2 → V3 → V4)
+## License
 
-| Metric / Feature | Vocalis V1 | Vocalis V2 | Vocalis V3 | Vocalis V4 |
-| :--- | :--- | :--- | :--- | :--- |
-| **Capability** | Voice Activity Detection | Wake-Word Spotting | Local Speech-to-Text | Local Voice Command Execution |
-| **Pipeline** | Mic → VAD | Mic → VAD → WW | Mic → VAD → WW → STT | Mic → VAD → WW → STT → Parse → Action |
-| **Action Execution**| ❌ None | ❌ None | ❌ None | ✅ Safe Local Apps & System Queries |
-| **State Machine** | Stream loop | Stream loop | 6 States | 9 States |
-| **Security Whitelist**| N/A | N/A | N/A | Strict Whitelist & Blacklist Guard |
-| **Cloud Dependency**| 0% (Offline) | 0% (Offline) | 0% (Offline) | 0% (Offline) |
-| **Total Latency** | ~1 ms | ~4 ms | ~600-900 ms | **~500-700 ms (Activation to Action)** |
-| **RAM Footprint** | ~120 MB | ~245 MB | ~280 MB | ~285 MB |
-
----
-
-## 11. Future Roadmap
-
-```text
-Vocalis V1  ──────► Voice Activity Detection (VAD)             [COMPLETED]
-    │
-Vocalis V2  ──────► Wake-Word Detection ("Hey Jarvis")         [COMPLETED]
-    │
-Vocalis V3  ──────► Speech-to-Text (STT - local faster-whisper)[COMPLETED]
-    │
-Vocalis V4  ──────► Local Command Assistant & Whitelisted Exec [COMPLETED]
-    │
-Vocalis V5  ──────► Local LLM Integration (Ollama / llama.cpp for fallback QA)
-    │
-Vocalis V6  ──────► Model Quantization & Hardware Acceleration
-    │
-Vocalis V7  ──────► Edge Hardware Deployment (Raspberry Pi / Jetson)
-```
-
----
-
-## 12. License
-
-Licensed under the MIT License.
+MIT License
